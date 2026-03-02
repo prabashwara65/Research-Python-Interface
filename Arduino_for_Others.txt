@@ -1,0 +1,125 @@
+#include <DHT.h>
+#include <Wire.h>
+#include <BH1750.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Servo.h>
+
+// ================= SENSOR PINS =================
+#define DHTPIN A2
+#define DHTTYPE DHT22
+#define SOLAR_PIN A1
+#define BATTERY_PIN A3   // Battery voltage
+
+// ================= OBJECTS =================
+DHT dht(DHTPIN, DHTTYPE);
+BH1750 lightMeter;
+
+// ================= OLED =================
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// ================= SERVOS =================
+Servo servo10; // horizontal
+Servo servo12; // vertical
+
+// ================= TIMING =================
+unsigned long lastSensorRead = 0;
+const unsigned long SENSOR_INTERVAL = 1000; // 1 second
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(9600);  // For Python communication
+  dht.begin();
+  Wire.begin();
+
+  // Initialize BH1750
+  if (!lightMeter.begin()) {
+    // Show error on OLED
+    if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.setTextColor(SSD1306_WHITE);
+      display.println("❌ BH1750 not found!");
+      display.display();
+    }
+    while (1); // Stop execution
+  }
+
+  // Initialize OLED
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    while (1); // Stop if OLED fails
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("✅ System Ready");
+  display.display();
+
+  // Attach servos
+  servo10.attach(10);
+  servo12.attach(12);
+  servo10.write(25);
+  servo12.write(25);
+}
+
+// ================= LOOP =================
+void loop() {
+  unsigned long currentMillis = millis();
+
+  // ---------- SENSOR READ EVERY 1s ----------
+  if (currentMillis - lastSensorRead >= SENSOR_INTERVAL) {
+    lastSensorRead = currentMillis;
+
+    // Read sensors
+    float temp = dht.readTemperature();
+    float hum = dht.readHumidity();
+    float lux = lightMeter.readLightLevel();
+
+    int rawSolar = analogRead(SOLAR_PIN);
+    float solarVolt = rawSolar * (5.0 / 1023.0);
+
+    int rawBattery = analogRead(BATTERY_PIN);
+    float batteryVolt = rawBattery * (5.0 / 1023.0);
+
+    // ---------- OLED DISPLAY ----------
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.print("Temp: "); display.print(temp, 1); display.println(" C");
+    display.print("Hum : "); display.print(hum, 1); display.println(" %");
+    display.print("Lux : "); display.print(lux, 0); display.println(" lx");
+    display.print("Solar: "); display.print(solarVolt, 2); display.println(" V");
+    display.print("Batt : "); display.print(batteryVolt, 2); display.println(" V");
+    display.display();
+
+    // ---------- SERIAL CSV OUTPUT ----------
+    // Format: TEMP,HUM,LUX,SOLAR,BATTERY
+    Serial.print(temp); Serial.print(",");
+    Serial.print(hum); Serial.print(",");
+    Serial.print(lux); Serial.print(",");
+    Serial.print(solarVolt); Serial.print(",");
+    Serial.println(batteryVolt);
+  }
+
+  // ---------- SERVO CONTROL ----------
+  if (Serial.available()) {
+    String data = Serial.readStringUntil('\n');
+    int comma = data.indexOf(',');
+
+    if (comma > 0) {
+      int angleH = data.substring(0, comma).toInt();
+      int angleV = data.substring(comma + 1).toInt();
+
+      // Constrain angles
+      angleH = constrain(angleH, 0, 180);
+      angleV = constrain(angleV, 0, 180);
+
+      servo10.write(angleH);
+      servo12.write(angleV);
+    }
+  }
+}
