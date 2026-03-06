@@ -24,9 +24,9 @@ bool oledWorking = false;
 
 // ================= SERVOS =================
 Servo servo9;   // Mirror UP/DOWN (pin 9) - Range: 20-70
-Servo servo10;  // ARM LEFT/RIGHT (pin 10) - Range: 1-70
+Servo servo10;  // ARM LEFT/RIGHT (pin 10) - Range: 1-70 (original horizontal)
 Servo servo11;  // Mirror LEFT/RIGHT (pin 11) - Range: 40-100
-Servo servo12;  // ARM UP/DOWN (pin 12) - Range: 30-70
+Servo servo12;  // ARM UP/DOWN (pin 12) - Range: 30-70 (original vertical)
 
 // Servo angle limits
 #define MIRROR_UP_DOWN_MIN 20
@@ -39,18 +39,9 @@ Servo servo12;  // ARM UP/DOWN (pin 12) - Range: 30-70
 #define ARM_UP_DOWN_MIN 30
 #define ARM_UP_DOWN_MAX 70
 
-// DEFAULT POSITIONS (Center/Neutral)
-#define DEFAULT_MIRROR_UP_DOWN ((MIRROR_UP_DOWN_MIN + MIRROR_UP_DOWN_MAX) / 2)  // 45°
-#define DEFAULT_ARM_LEFT_RIGHT ((ARM_LEFT_RIGHT_MIN + ARM_LEFT_RIGHT_MAX) / 2)  // 35°
-#define DEFAULT_MIRROR_LEFT_RIGHT ((MIRROR_LEFT_RIGHT_MIN + MIRROR_LEFT_RIGHT_MAX) / 2)  // 70°
-#define DEFAULT_ARM_UP_DOWN ((ARM_UP_DOWN_MIN + ARM_UP_DOWN_MAX) / 2)  // 50°
-
 // ================= TIMING =================
 unsigned long lastSensorRead = 0;
 const unsigned long SENSOR_INTERVAL = 1000; // 1 second
-
-// Flag to track if we've received first command
-bool firstCommandReceived = false;
 
 // ================= SETUP =================
 void setup() {
@@ -79,34 +70,38 @@ void setup() {
     Serial.println("✅ OLED found");
   }
 
-  // Attach all 4 Servos BUT DO NOT MOVE THEM YET
-  servo9.attach(9);
-  servo10.attach(10);
-  servo11.attach(11);
-  servo12.attach(12);
+  // Attach all 4 Servos
+  servo9.attach(9);   // Mirror UP/DOWN
+  servo10.attach(10); // ARM LEFT/RIGHT (original horizontal)
+  servo11.attach(11); // Mirror LEFT/RIGHT
+  servo12.attach(12); // ARM UP/DOWN (original vertical)
   
-  // IMPORTANT: Do NOT write any angles here - let servos stay where they are
-  // Just attach them without moving
-  
+  // Set initial positions
+  servo9.write(MIRROR_UP_DOWN_MIN);      // 20° - mirror up
+  servo10.write(ARM_LEFT_RIGHT_MIN);     // 1° - arm left
+  servo11.write(MIRROR_LEFT_RIGHT_MIN);  // 40° - mirror left
+  servo12.write(ARM_UP_DOWN_MIN);        // 30° - arm up
+
+  // Display initial positions on OLED if working
+  if (oledWorking) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("4 Servos Ready");
+    display.print("D9:"); display.print(MIRROR_UP_DOWN_MIN);
+    display.print(" D10:"); display.print(ARM_LEFT_RIGHT_MIN);
+    display.setCursor(0, 20);
+    display.print("D11:"); display.print(MIRROR_LEFT_RIGHT_MIN);
+    display.print(" D12:"); display.print(ARM_UP_DOWN_MIN);
+    display.display();
+    delay(2000);
+  }
+
   Serial.println("✅ Arduino Ready with 4 servos:");
   Serial.println("   D9: Mirror UP/DOWN (20-70°)");
   Serial.println("   D10: ARM LEFT/RIGHT (1-70°)");
   Serial.println("   D11: Mirror LEFT/RIGHT (40-100°)");
   Serial.println("   D12: ARM UP/DOWN (30-70°)");
   Serial.println("Send commands as: angle9,angle10,angle11,angle12");
-  Serial.println("Waiting for first command...");
-  
-  // Display waiting message on OLED
-  if (oledWorking) {
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println("4 Servos Ready");
-    display.println("Waiting for");
-    display.println("commands...");
-    display.display();
-  }
 }
 
 // ================= LOOP =================
@@ -152,13 +147,6 @@ void loop() {
       display.setCursor(0, 40);
       display.print("D11:"); display.print(servo11.read());
       display.print(" D12:"); display.print(servo12.read());
-      
-      // Show if waiting for first command
-      if (!firstCommandReceived) {
-        display.setCursor(0, 55);
-        display.print("WAITING...");
-      }
-      
       display.display();
     }
   }
@@ -203,12 +191,6 @@ void loop() {
         servo10.write(angle10);
         servo11.write(angle11);
         servo12.write(angle12);
-        
-        // Mark that we've received first command
-        if (!firstCommandReceived) {
-          firstCommandReceived = true;
-          Serial.println("✅ First command received - servos now under PC control");
-        }
 
         // Debug output
         Serial.print("Moved - D9:"); Serial.print(angle9);
@@ -221,26 +203,13 @@ void loop() {
         int angle10 = constrain(values[0], ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
         int angle12 = constrain(values[1], ARM_UP_DOWN_MIN, ARM_UP_DOWN_MAX);
 
-        // Keep mirrors at their current positions, don't change them
-        // Only move the ARM servos
-        
-        // Read current mirror positions instead of resetting them
-        int currentMirrorUpDown = servo9.read();
-        int currentMirrorLeftRight = servo11.read();
-        
-        servo9.write(currentMirrorUpDown);  // Stay at current position
+        // Keep mirrors at default positions
+        servo9.write((MIRROR_UP_DOWN_MIN + MIRROR_UP_DOWN_MAX) / 2);  // Center mirror up/down
         servo10.write(angle10);
-        servo11.write(currentMirrorLeftRight);  // Stay at current position
+        servo11.write((MIRROR_LEFT_RIGHT_MIN + MIRROR_LEFT_RIGHT_MAX) / 2);  // Center mirror left/right
         servo12.write(angle12);
-        
-        if (!firstCommandReceived) {
-          firstCommandReceived = true;
-          Serial.println("✅ First command received (legacy mode)");
-        }
 
-        Serial.print("Legacy mode - D9:"); Serial.print(currentMirrorUpDown);
-        Serial.print(" D10:"); Serial.print(angle10);
-        Serial.print(" D11:"); Serial.print(currentMirrorLeftRight);
+        Serial.print("Legacy mode - D10:"); Serial.print(angle10);
         Serial.print(" D12:"); Serial.println(angle12);
       }
       else {
@@ -249,7 +218,4 @@ void loop() {
       }
     }
   }
-  
-  // Small delay to prevent overwhelming the serial buffer
-  delay(10);
 }
