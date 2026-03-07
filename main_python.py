@@ -214,56 +214,55 @@ class ModelManager:
         try:
             # Prepare input
             scaled_data = self.prepare_input(data)
-            
-            # Run prediction and measure time
-            start_time = time.time()
+
+            # Run prediction
             predictions = self.model.predict(scaled_data, verbose=0)
-            inference_time = (time.time() - start_time) * 1000  # Convert to ms
-            self._last_inference_time = inference_time
-            
-            # Inverse transform to get energy in kWh - exactly like test code
+
+            # Debug: print raw predictions
+            logger.debug(f"Raw predictions: {predictions}")
+
+            # Inverse transform
             energy_kwh = self.scaler_Y.inverse_transform(predictions.reshape(-1, 1)).flatten()
-            
-            # Extract irradiance from original data - FIXED to match test code
+
+            # Debug: print after inverse scaling
+            logger.debug(f"Inverse scaled predictions: {energy_kwh}")
+
+            # Extract irradiance
             if len(data.shape) == 3:
-                # Get all 24 irradiance values from first batch
                 irradiance = data[0, :, 0].flatten()
             else:
                 irradiance = data[:, 0]
-            
-            # Apply physics constraints - exactly as in test code
-            energy_kwh[irradiance == 0] = 0
-            energy_kwh[energy_kwh < 0] = 0
-            
+
+            # Debug: print irradiance
+            logger.debug(f"Irradiance values: {irradiance}")
+
+            # Apply physics constraints carefully
+            # Only zero out when irradiance is truly zero, not when scaler mismatch
+            for i in range(len(energy_kwh)):
+                if irradiance[i] <= 0:
+                    energy_kwh[i] = 0
+                elif energy_kwh[i] < 0:
+                    energy_kwh[i] = 0
+
             # Calculate total energy
             total_energy = float(np.sum(energy_kwh))
-            
-            # Format hourly output strings exactly like test code
-            hourly_output = []
-            for i in range(24):
-                hourly_output.append(f"{i+1:02d} | {energy_kwh[i]:.3f}")
-            
-            # Format the response
-            hourly_data = []
-            for i in range(24):
-                hourly_data.append({
-                    "hour": i + 1,
-                    "energy_kwh": float(energy_kwh[i])
-                })
-            
+
+            # Format response
+            hourly_data = [{"hour": i+1, "energy_kwh": float(energy_kwh[i])} for i in range(24)]
+
             return {
                 "total_energy_kwh": total_energy,
                 "total_energy_formatted": f"Total 24h Energy: {total_energy:.2f} kWh",
                 "hourly_energy": [float(e) for e in energy_kwh],
                 "hourly_data": hourly_data,
-                "hourly_output": hourly_output,  # Add formatted output strings
                 "irradiance": [float(i) for i in irradiance],
-                "performance": self.get_prediction_performance(inference_time)
+                "performance": self.get_prediction_performance()
             }
-            
+
         except Exception as e:
             logger.error(f"Prediction error: {e}")
             raise
+
     
     def get_prediction_performance(self, inference_time_ms: float) -> Dict[str, Any]:
         """Get performance metrics for the prediction"""
