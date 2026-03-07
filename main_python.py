@@ -374,6 +374,36 @@ class SolarPredictionServer:
             logger.error(f"❌ Invalid JSON payload: {e}")
         except Exception as e:
             logger.error(f"❌ Error processing message: {e}")
+
+    def _extract_sensor_array(self, payload: Dict[str, Any]) -> Optional[np.ndarray]:
+        """Extract and normalize sensor data to shape (24, 3)."""
+        source = payload
+        if isinstance(payload.get("payload"), dict):
+            source = payload["payload"]
+        elif isinstance(payload.get("message"), dict):
+            source = payload["message"]
+
+        sensor_data = (
+            source.get("sensor_data")
+            or source.get("sensorData")
+            or source.get("data")
+        )
+        if sensor_data is None:
+            return None
+
+        if isinstance(sensor_data, list) and sensor_data and isinstance(sensor_data[0], dict):
+            normalized = []
+            for row in sensor_data:
+                irr = row.get("irradiance", row.get("irr", row.get("solar", 0)))
+                temp = row.get("temperature", row.get("temp", 0))
+                hum = row.get("humidity", row.get("hum", 0))
+                normalized.append([irr, temp, hum])
+            sensor_data = normalized
+
+        sensor_array = np.array(sensor_data, dtype=np.float32)
+        if sensor_array.shape == (1, 24, 3):
+            sensor_array = sensor_array[0]
+        return sensor_array
     
     def _process_request(self, request: Dict[str, Any]):
         """Process a single prediction request"""
@@ -386,29 +416,27 @@ class SolarPredictionServer:
                 request_id = f"auto_{int(time.time() * 1000)}"
                 logger.warning(f"No requestId provided, generated: {request_id}")
             
-            device_id = payload.get('deviceId', 'unknown')
+            device_id = payload.get('deviceId') or payload.get('device_id') or 'unknown'
             
             logger.info(f"🔄 Processing request {request_id} from device {device_id}")
             
-            # Get sensor data from payload (support common key variants)
-            sensor_data = (
-                payload.get('sensor_data')
-                or payload.get('sensorData')
-                or payload.get('data')
-            )
-
-            if sensor_data is not None:
-                # Convert to numpy array
-                sensor_array = np.array(sensor_data, dtype=np.float32)
-                
+            sensor_array = self._extract_sensor_array(payload)
+            if sensor_array is not None:
                 # Validate shape
                 if sensor_array.shape != (24, 3):
-                    error_msg = f"Invalid sensor data shape: {sensor_array.shape}, expected (24, 3)"
+                    error_msg = (
+                        f"Invalid sensor data shape: {sensor_array.shape}, expected (24, 3). "
+                        f"Payload keys: {list(payload.keys())}"
+                    )
                     logger.error(f"❌ {error_msg}")
                     self._send_error_response(request_id, device_id, error_msg)
                     return
             else:
-                error_msg = "No sensor data found in payload. Expected one of: sensor_data, sensorData, data"
+                error_msg = (
+                    "No sensor data found in payload. Expected one of: sensor_data, sensorData, data "
+                    "(directly or inside payload/message wrapper). "
+                    f"Payload keys: {list(payload.keys())}"
+                )
                 logger.error(f"❌ {error_msg}")
                 self._send_error_response(request_id, device_id, error_msg)
                 return
@@ -473,7 +501,11 @@ class SolarPredictionServer:
             error_request_id = 'unknown'
             if 'payload' in locals():
                 error_request_id = payload.get('requestId') or payload.get('request_id', 'unknown')
-            error_device_id = payload.get('deviceId', 'unknown') if 'payload' in locals() else 'unknown'
+            error_device_id = (
+                (payload.get('deviceId') or payload.get('device_id') or 'unknown')
+                if 'payload' in locals()
+                else 'unknown'
+            )
             self._send_error_response(error_request_id, error_device_id, str(e))
     
     def _send_error_response(self, request_id: str, device_id: str, error_message: str):
@@ -501,7 +533,7 @@ class SolarPredictionServer:
                 1
             )
             
-            logger.info(f"⚠️ Error response sent for request {request_id}")
+            logger.info(f"⚠️ Error response sent for request {request_id}: {error_message}")
             
         except Exception as e:
             logger.error(f"❌ Failed to send error response: {e}")
