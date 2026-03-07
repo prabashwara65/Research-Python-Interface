@@ -215,8 +215,10 @@ class ModelManager:
             # Prepare input
             scaled_data = self.prepare_input(data)
 
-            # Run prediction
+            # Run prediction and capture inference time
+            start_time = time.time()
             predictions = self.model.predict(scaled_data, verbose=0)
+            inference_time = (time.time() - start_time) * 1000
 
             # Debug: print raw predictions
             logger.debug(f"Raw predictions: {predictions}")
@@ -249,14 +251,16 @@ class ModelManager:
 
             # Format response
             hourly_data = [{"hour": i+1, "energy_kwh": float(energy_kwh[i])} for i in range(24)]
+            hourly_output = [f"{i+1:02d} | {energy_kwh[i]:.3f}" for i in range(24)]
 
             return {
                 "total_energy_kwh": total_energy,
                 "total_energy_formatted": f"Total 24h Energy: {total_energy:.2f} kWh",
                 "hourly_energy": [float(e) for e in energy_kwh],
                 "hourly_data": hourly_data,
+                "hourly_output": hourly_output,
                 "irradiance": [float(i) for i in irradiance],
-                "performance": self.get_prediction_performance()
+                "performance": self.get_prediction_performance(inference_time)
             }
 
         except Exception as e:
@@ -386,9 +390,13 @@ class SolarPredictionServer:
             
             logger.info(f"🔄 Processing request {request_id} from device {device_id}")
             
-            # Get sensor data from payload
-            sensor_data = payload.get('sensor_data') or payload.get('data')
-            
+            # Get sensor data from payload (support common key variants)
+            sensor_data = (
+                payload.get('sensor_data')
+                or payload.get('sensorData')
+                or payload.get('data')
+            )
+
             if sensor_data is not None:
                 # Convert to numpy array
                 sensor_array = np.array(sensor_data, dtype=np.float32)
@@ -400,9 +408,10 @@ class SolarPredictionServer:
                     self._send_error_response(request_id, device_id, error_msg)
                     return
             else:
-                # Use default test data if none provided
-                logger.warning("⚠️ No sensor data provided, using zeros")
-                sensor_array = np.zeros((24, 3), dtype=np.float32)
+                error_msg = "No sensor data found in payload. Expected one of: sensor_data, sensorData, data"
+                logger.error(f"❌ {error_msg}")
+                self._send_error_response(request_id, device_id, error_msg)
+                return
             
             # Run prediction
             result = self.model_manager.predict(sensor_array)
