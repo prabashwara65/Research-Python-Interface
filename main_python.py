@@ -201,7 +201,7 @@ class ModelManager:
             raise
     
     def predict(self, data: np.ndarray) -> Dict[str, Any]:
-        """Run prediction on input data"""
+        """Run prediction on input data and return formatted results"""
         try:
             # Prepare input
             scaled_data = self.prepare_input(data)
@@ -225,15 +225,36 @@ class ModelManager:
             # Calculate total energy
             total_energy = float(np.sum(energy_kwh))
             
+            # Format the response to match the example output
+            hourly_data = []
+            for i in range(24):
+                hourly_data.append({
+                    "hour": i + 1,
+                    "energy_kwh": float(energy_kwh[i])
+                })
+            
             return {
                 "total_energy_kwh": total_energy,
+                "total_energy_formatted": f"Total 24h Energy: {total_energy:.2f} kWh",
                 "hourly_energy": [float(e) for e in energy_kwh],
-                "irradiance": [float(i) for i in irradiance]
+                "hourly_data": hourly_data,
+                "irradiance": [float(i) for i in irradiance],
+                "performance": self.get_prediction_performance()
             }
             
         except Exception as e:
             logger.error(f"Prediction error: {e}")
             raise
+    
+    def get_prediction_performance(self) -> Dict[str, Any]:
+        """Get performance metrics for the prediction"""
+        process = psutil.Process(os.getpid())
+        
+        return {
+            "inference_time_ms": np.mean([self._last_inference_time]) if hasattr(self, '_last_inference_time') else 0,
+            "cpu_usage": psutil.cpu_percent(interval=0.1),
+            "ram_usage_mb": process.memory_info().rss / (1024 * 1024)
+        }
     
     def get_performance_metrics(self) -> Dict[str, Any]:
         """Get current performance metrics"""
@@ -370,41 +391,65 @@ class SolarPredictionServer:
             result = self.model_manager.predict(sensor_array)
             inference_time = (time.time() - start_time) * 1000  # ms
             
-            # Prepare response with proper requestId
+            # Store last inference time for performance metrics
+            self.model_manager._last_inference_time = inference_time
+            
+            # Format the hourly output exactly like the example
+            hourly_output = []
+            for i in range(24):
+                hourly_output.append(f"{i+1:02d} | {result['hourly_energy'][i]:.3f}")
+            
+            # Prepare response with formatted data
             response = {
-                "requestId": request_id,  # Use the same requestId from request
+                "requestId": request_id,
                 "deviceId": device_id,
                 "timestamp": time.time(),
+                "timestamp_str": datetime.fromtimestamp(time.time()).isoformat(),
                 "inference_time_ms": inference_time,
                 "status": "success",
-                **result
+                "total_energy_kwh": result['total_energy_kwh'],
+                "total_energy_formatted": result['total_energy_formatted'],
+                "hourly_energy": result['hourly_energy'],
+                "hourly_output": hourly_output,  # Formatted hourly output
+                "irradiance": result['irradiance'],
+                "performance": {
+                    "model_size_mb": self.model_manager.model_size_mb,
+                    "inference_time_ms": inference_time,
+                    "cpu_usage": psutil.cpu_percent(interval=0.1),
+                    "ram_usage_mb": result['performance']['ram_usage_mb']
+                }
             }
             
-            # Publish response to response topic
+            # Also create a simplified response with just the total energy if needed
+            simple_response = {
+                "requestId": request_id,
+                "deviceId": device_id,
+                "total_energy": result['total_energy_formatted'],
+                "total_energy_kwh": round(result['total_energy_kwh'], 2),
+                "timestamp": time.time()
+            }
+            
+            # Publish full response to response topic
             self.mqtt_client.publish(
                 Config.RESPONSE_TOPIC,
                 json.dumps(response),
                 1
             )
-            logger.info(f"✅ Response sent for request {request_id} (inference: {inference_time:.2f}ms)")
+            logger.info(f"✅ Full response sent for request {request_id} (inference: {inference_time:.2f}ms)")
             
-            # Also publish to result topic (for backward compatibility)
+            # Also publish simplified response to result topic
             self.mqtt_client.publish(
                 Config.CLIENT_PUBLISH_TOPIC,
-                json.dumps(response),
+                json.dumps(simple_response),
                 1
             )
-            logger.info(f"✅ Result published to {Config.CLIENT_PUBLISH_TOPIC}")
+            logger.info(f"✅ Simplified result published to {Config.CLIENT_PUBLISH_TOPIC}: {result['total_energy_formatted']}")
             
             # Log to DynamoDB if available
             if self.dynamodb and self.table:
                 try:
-                    # Add timestamp for DynamoDB
-                    response['timestamp_str'] = datetime.fromtimestamp(response['timestamp']).isoformat()
-                    
                     # Convert floats to Decimal for DynamoDB
                     dynamodb_item = convert_floats_to_decimal(response)
-                    
                     self.table.put_item(Item=dynamodb_item)
                     logger.info(f"💾 Prediction logged to DynamoDB for request {request_id}")
                 except Exception as e:
@@ -797,30 +842,35 @@ class SolarPredictionApp:
 # UTILITY FUNCTIONS
 # =============================
 def generate_test_sensor_data() -> List[List[float]]:
-    """Generate test sensor data for 24 hours"""
+    """Generate test sensor data for 24 hours - matching the example"""
     
-    # Create realistic solar pattern
-    hours = 24
-    data = []
-    
-    for hour in range(hours):
-        # Simulate irradiance (sine wave pattern)
-        if 6 <= hour <= 18:  # Daytime
-            irradiance = np.sin((hour - 6) * np.pi / 12) ** 2
-        else:  # Nighttime
-            irradiance = 0
-        
-        # Temperature (higher during day)
-        temperature = 20 + 10 * irradiance + np.random.normal(0, 1)
-        
-        # Humidity (lower during day)
-        humidity = 60 - 30 * irradiance + np.random.normal(0, 5)
-        
-        data.append([
-            float(irradiance),
-            float(temperature),
-            float(max(0, min(100, humidity)))
-        ])
+    # This matches the exact pattern from your example
+    data = [
+        [0.00, 0.55, 0.85],
+        [0.00, 0.54, 0.86],
+        [0.00, 0.53, 0.87],
+        [0.00, 0.52, 0.88],
+        [0.00, 0.51, 0.89],
+        [0.00, 0.50, 0.90],
+        [0.15, 0.55, 0.85],
+        [0.30, 0.60, 0.80],
+        [0.50, 0.65, 0.75],
+        [0.70, 0.70, 0.70],
+        [0.90, 0.75, 0.65],
+        [1.00, 0.78, 0.60],
+        [0.95, 0.77, 0.62],
+        [0.80, 0.74, 0.65],
+        [0.60, 0.70, 0.70],
+        [0.40, 0.65, 0.75],
+        [0.20, 0.60, 0.80],
+        [0.05, 0.58, 0.82],
+        [0.00, 0.55, 0.85],
+        [0.00, 0.54, 0.86],
+        [0.00, 0.53, 0.87],
+        [0.00, 0.52, 0.88],
+        [0.00, 0.51, 0.89],
+        [0.00, 0.50, 0.90],
+    ]
     
     return data
 
@@ -829,7 +879,7 @@ def send_test_prediction_request():
     
     publisher = SolarDataPublisher()
     if publisher.connect():
-        # Generate test sensor data
+        # Generate test sensor data matching the example
         sensor_data = generate_test_sensor_data()
         
         # Generate a unique requestId
@@ -856,11 +906,13 @@ def send_test_prediction_request():
         client.loop_start()
         
         print(f"\n📤 Sending test request with requestId: {request_id}")
+        print(f"📤 Using sensor data matching the example pattern")
         result = client.publish(Config.REQUEST_TOPIC, json.dumps(request), qos=1)
         
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
             logger.info(f"✅ Test prediction request sent with requestId: {request_id}")
             print(f"✅ Request sent. Check response on topic: {Config.RESPONSE_TOPIC}")
+            print(f"✅ Also check simplified result on: {Config.CLIENT_PUBLISH_TOPIC}")
         else:
             logger.error("❌ Failed to send test request")
         
