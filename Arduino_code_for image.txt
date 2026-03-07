@@ -20,10 +20,24 @@ BH1750 lightMeter;
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+bool oledWorking = false;
 
 // ================= SERVOS =================
-Servo servo10; // horizontal
-Servo servo12; // vertical
+Servo servo9;   // Mirror UP/DOWN (pin 9) - Range: 20-70
+Servo servo10;  // ARM LEFT/RIGHT (pin 10) - Range: 1-70 (original horizontal)
+Servo servo11;  // Mirror LEFT/RIGHT (pin 11) - Range: 40-100
+Servo servo12;  // ARM UP/DOWN (pin 12) - Range: 30-70 (original vertical)
+
+// Servo angle limits
+#define MIRROR_UP_DOWN_MIN 20
+#define MIRROR_UP_DOWN_MAX 70
+#define MIRROR_LEFT_RIGHT_MIN 40
+#define MIRROR_LEFT_RIGHT_MAX 100
+
+#define ARM_LEFT_RIGHT_MIN 1
+#define ARM_LEFT_RIGHT_MAX 70
+#define ARM_UP_DOWN_MIN 30
+#define ARM_UP_DOWN_MAX 70
 
 // ================= TIMING =================
 unsigned long lastSensorRead = 0;
@@ -31,7 +45,11 @@ const unsigned long SENSOR_INTERVAL = 1000; // 1 second
 
 // ================= SETUP =================
 void setup() {
-  Serial.begin(9600);  // Needed for Python control
+  Serial.begin(9600);
+  delay(1000);
+  
+  Serial.println("🚀 Arduino Starting up with 4 servos...");
+  
   dht.begin();
   Wire.begin();
 
@@ -41,85 +59,163 @@ void setup() {
   }
 
   // Initialize OLED
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("❌ OLED failed");
-    while (1);
+  oledWorking = display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  if (!oledWorking) {
+    oledWorking = display.begin(SSD1306_SWITCHCAPVCC, 0x3D);
+  }
+  
+  if (!oledWorking) {
+    Serial.println("❌ OLED failed - continuing without display");
+  } else {
+    Serial.println("✅ OLED found");
   }
 
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("System Ready");
-  display.display();
+  // Attach all 4 Servos
+  servo9.attach(9);   // Mirror UP/DOWN
+  servo10.attach(10); // ARM LEFT/RIGHT (original horizontal)
+  servo11.attach(11); // Mirror LEFT/RIGHT
+  servo12.attach(12); // ARM UP/DOWN (original vertical)
+  
+  // Set initial positions
+  servo9.write(MIRROR_UP_DOWN_MIN);      // 20° - mirror up
+  servo10.write(ARM_LEFT_RIGHT_MIN);     // 1° - arm left
+  servo11.write(MIRROR_LEFT_RIGHT_MIN);  // 40° - mirror left
+  servo12.write(ARM_UP_DOWN_MIN);        // 30° - arm up
 
-  // Attach Servos
-  servo10.attach(10);
-  servo12.attach(12);
-  servo10.write(25);
-  servo12.write(25);
+  // Display initial positions on OLED if working
+  if (oledWorking) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("4 Servos Ready");
+    display.print("D9:"); display.print(MIRROR_UP_DOWN_MIN);
+    display.print(" D10:"); display.print(ARM_LEFT_RIGHT_MIN);
+    display.setCursor(0, 20);
+    display.print("D11:"); display.print(MIRROR_LEFT_RIGHT_MIN);
+    display.print(" D12:"); display.print(ARM_UP_DOWN_MIN);
+    display.display();
+    delay(2000);
+  }
 
-  Serial.println("✅ Arduino Ready");
+  Serial.println("✅ Arduino Ready with 4 servos:");
+  Serial.println("   D9: Mirror UP/DOWN (20-70°)");
+  Serial.println("   D10: ARM LEFT/RIGHT (1-70°)");
+  Serial.println("   D11: Mirror LEFT/RIGHT (40-100°)");
+  Serial.println("   D12: ARM UP/DOWN (30-70°)");
+  Serial.println("Send commands as: angle9,angle10,angle11,angle12");
 }
 
 // ================= LOOP =================
 void loop() {
+  unsigned long currentMillis = millis();
 
   // ---------- SENSOR READ EVERY 1s ----------
-  if (millis() - lastSensorRead >= SENSOR_INTERVAL) {
-    lastSensorRead = millis();
+  if (currentMillis - lastSensorRead >= SENSOR_INTERVAL) {
+    lastSensorRead = currentMillis;
 
     float temp = dht.readTemperature();
     float hum = dht.readHumidity();
     float lux = lightMeter.readLightLevel();
+    
+    if (isnan(temp) || isnan(hum)) {
+      temp = 0;
+      hum = 0;
+    }
 
-    // Read solar panel voltage
     int rawSolar = analogRead(SOLAR_PIN);
     float solarVolt = rawSolar * (5.0 / 1023.0);
 
-    // Read battery voltage
     int rawBattery = analogRead(BATTERY_PIN);
     float batteryVolt = rawBattery * (5.0 / 1023.0);
 
     // -------- SERIAL OUTPUT (CSV) --------
     // Format: TEMP,HUM,LUX,SOLAR,BATTERY
-    Serial.print(temp); Serial.print(",");
-    Serial.print(hum); Serial.print(",");
-    Serial.print(lux); Serial.print(",");
-    Serial.print(solarVolt); Serial.print(",");
-    Serial.println(batteryVolt);
+    Serial.print(temp, 1); Serial.print(",");
+    Serial.print(hum, 1); Serial.print(",");
+    Serial.print(lux, 0); Serial.print(",");
+    Serial.print(solarVolt, 2); Serial.print(",");
+    Serial.println(batteryVolt, 2);
 
-    // -------- OLED DISPLAY --------
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.print("Temp: "); display.print(temp, 1); display.println(" C");
-    display.print("Hum : "); display.print(hum, 1); display.println(" %");
-    display.print("Lux : "); display.print(lux, 0); display.println(" lx");
-    display.print("Solar: "); display.print(solarVolt, 2); display.println(" V");
-    display.print("Batt : "); display.print(batteryVolt, 2); display.println(" V");
-    display.display();
+    // -------- OLED DISPLAY (if working) --------
+    if (oledWorking) {
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.print("T:"); display.print(temp, 1); display.print("C H:"); display.print(hum, 1); display.println("%");
+      display.print("Lux:"); display.print(lux, 0); display.print(" S:"); display.print(solarVolt, 1); display.print("V");
+      display.setCursor(0, 25);
+      display.print("D9:"); display.print(servo9.read());
+      display.print(" D10:"); display.print(servo10.read());
+      display.setCursor(0, 40);
+      display.print("D11:"); display.print(servo11.read());
+      display.print(" D12:"); display.print(servo12.read());
+      display.display();
+    }
   }
 
   // ---------- SERVO CONTROL ----------
   if (Serial.available()) {
     String data = Serial.readStringUntil('\n');
-    int comma = data.indexOf(',');
+    data.trim();
+    
+    if (data.length() > 0) {
+      // Parse 4 values: angle9, angle10, angle11, angle12
+      int values[4] = {0, 0, 0, 0};
+      int index = 0;
+      int lastPos = 0;
+      
+      for (int i = 0; i < data.length(); i++) {
+        if (data.charAt(i) == ',' || i == data.length() - 1) {
+          String valueStr;
+          if (i == data.length() - 1) {
+            valueStr = data.substring(lastPos, i + 1);
+          } else {
+            valueStr = data.substring(lastPos, i);
+          }
+          valueStr.trim();
+          if (valueStr.length() > 0 && index < 4) {
+            values[index] = valueStr.toInt();
+            index++;
+          }
+          lastPos = i + 1;
+        }
+      }
+      
+      // Check if we received 4 values
+      if (index == 4) {
+        int angle9 = constrain(values[0], MIRROR_UP_DOWN_MIN, MIRROR_UP_DOWN_MAX);
+        int angle10 = constrain(values[1], ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
+        int angle11 = constrain(values[2], MIRROR_LEFT_RIGHT_MIN, MIRROR_LEFT_RIGHT_MAX);
+        int angle12 = constrain(values[3], ARM_UP_DOWN_MIN, ARM_UP_DOWN_MAX);
 
-    if (comma > 0) {
-      int angleH = data.substring(0, comma).toInt();
-      int angleV = data.substring(comma + 1).toInt();
+        // Move all servos
+        servo9.write(angle9);
+        servo10.write(angle10);
+        servo11.write(angle11);
+        servo12.write(angle12);
 
-      // Constrain angles
-      angleH = constrain(angleH, 0, 180);
-      angleV = constrain(angleV, 0, 180);
+        // Debug output
+        Serial.print("Moved - D9:"); Serial.print(angle9);
+        Serial.print(" D10:"); Serial.print(angle10);
+        Serial.print(" D11:"); Serial.print(angle11);
+        Serial.print(" D12:"); Serial.println(angle12);
+      } 
+      // For backward compatibility - if only 2 values received
+      else if (index == 2) {
+        int angle10 = constrain(values[0], ARM_LEFT_RIGHT_MIN, ARM_LEFT_RIGHT_MAX);
+        int angle12 = constrain(values[1], ARM_UP_DOWN_MIN, ARM_UP_DOWN_MAX);
 
-      // Move servos
-      servo10.write(angleH);
-      servo12.write(angleV);
+        // Keep mirrors at default positions
+        servo9.write((MIRROR_UP_DOWN_MIN + MIRROR_UP_DOWN_MAX) / 2);  // Center mirror up/down
+        servo10.write(angle10);
+        servo11.write((MIRROR_LEFT_RIGHT_MIN + MIRROR_LEFT_RIGHT_MAX) / 2);  // Center mirror left/right
+        servo12.write(angle12);
 
-      // Debug output
-      Serial.print("Servo H:"); Serial.print(angleH);
-      Serial.print(" V:"); Serial.println(angleV);
+        Serial.print("Legacy mode - D10:"); Serial.print(angle10);
+        Serial.print(" D12:"); Serial.println(angle12);
+      }
+      else {
+        Serial.print("⚠️ Expected 2 or 4 values, got ");
+        Serial.println(index);
+      }
     }
   }
 }
