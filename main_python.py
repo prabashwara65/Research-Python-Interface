@@ -141,6 +141,7 @@ class ModelManager:
         self.scaler_Y = None
         self.model_size_mb = 0
         self.load_time = 0
+        self._last_inference_time = 0
         self._initialized = True
         
     def load_models(self):
@@ -188,14 +189,22 @@ class ModelManager:
     def prepare_input(self, recent_data: np.ndarray) -> np.ndarray:
         """Scale and reshape input data"""
         try:
-            if len(recent_data.shape) == 2:
-                recent_data = recent_data.reshape(1, 24, 3)
-            
-            # Reshape to (24, 3) for scaling
-            reshaped = recent_data.reshape(24, 3)
-            scaled = self.scaler_X.transform(reshaped)
-            return scaled.reshape(1, 24, 3)
-            
+            # Ensure data is in the right shape for scaling
+            if len(recent_data.shape) == 3:
+                # Data is already batched: (batch, 24, 3)
+                batch_size = recent_data.shape[0]
+                # Reshape to (batch*24, 3) for scaling
+                reshaped = recent_data.reshape(-1, 3)
+                scaled = self.scaler_X.transform(reshaped)
+                # Reshape back to (batch, 24, 3)
+                return scaled.reshape(batch_size, 24, 3)
+            elif len(recent_data.shape) == 2:
+                # Data is (24, 3) - single sample
+                scaled = self.scaler_X.transform(recent_data)
+                return scaled.reshape(1, 24, 3)
+            else:
+                raise ValueError(f"Unexpected input shape: {recent_data.shape}")
+                
         except Exception as e:
             logger.error(f"Error preparing input: {e}")
             raise
@@ -206,26 +215,35 @@ class ModelManager:
             # Prepare input
             scaled_data = self.prepare_input(data)
             
-            # Run prediction
+            # Run prediction and measure time
+            start_time = time.time()
             predictions = self.model.predict(scaled_data, verbose=0)
+            inference_time = (time.time() - start_time) * 1000  # Convert to ms
+            self._last_inference_time = inference_time
             
-            # Inverse transform
+            # Inverse transform to get energy in kWh - exactly like test code
             energy_kwh = self.scaler_Y.inverse_transform(predictions.reshape(-1, 1)).flatten()
             
-            # Extract irradiance from original data
+            # Extract irradiance from original data - FIXED to match test code
             if len(data.shape) == 3:
+                # Get all 24 irradiance values from first batch
                 irradiance = data[0, :, 0].flatten()
             else:
                 irradiance = data[:, 0]
             
-            # Apply physics constraints
+            # Apply physics constraints - exactly as in test code
             energy_kwh[irradiance == 0] = 0
             energy_kwh[energy_kwh < 0] = 0
             
             # Calculate total energy
             total_energy = float(np.sum(energy_kwh))
             
-            # Format the response to match the example output
+            # Format hourly output strings exactly like test code
+            hourly_output = []
+            for i in range(24):
+                hourly_output.append(f"{i+1:02d} | {energy_kwh[i]:.3f}")
+            
+            # Format the response
             hourly_data = []
             for i in range(24):
                 hourly_data.append({
@@ -238,20 +256,21 @@ class ModelManager:
                 "total_energy_formatted": f"Total 24h Energy: {total_energy:.2f} kWh",
                 "hourly_energy": [float(e) for e in energy_kwh],
                 "hourly_data": hourly_data,
+                "hourly_output": hourly_output,  # Add formatted output strings
                 "irradiance": [float(i) for i in irradiance],
-                "performance": self.get_prediction_performance()
+                "performance": self.get_prediction_performance(inference_time)
             }
             
         except Exception as e:
             logger.error(f"Prediction error: {e}")
             raise
     
-    def get_prediction_performance(self) -> Dict[str, Any]:
+    def get_prediction_performance(self, inference_time_ms: float) -> Dict[str, Any]:
         """Get performance metrics for the prediction"""
         process = psutil.Process(os.getpid())
         
         return {
-            "inference_time_ms": np.mean([self._last_inference_time]) if hasattr(self, '_last_inference_time') else 0,
+            "inference_time_ms": inference_time_ms,
             "cpu_usage": psutil.cpu_percent(interval=0.1),
             "ram_usage_mb": process.memory_info().rss / (1024 * 1024)
         }
@@ -387,17 +406,7 @@ class SolarPredictionServer:
                 sensor_array = np.zeros((24, 3), dtype=np.float32)
             
             # Run prediction
-            start_time = time.time()
             result = self.model_manager.predict(sensor_array)
-            inference_time = (time.time() - start_time) * 1000  # ms
-            
-            # Store last inference time for performance metrics
-            self.model_manager._last_inference_time = inference_time
-            
-            # Format the hourly output exactly like the example
-            hourly_output = []
-            for i in range(24):
-                hourly_output.append(f"{i+1:02d} | {result['hourly_energy'][i]:.3f}")
             
             # Prepare response with formatted data
             response = {
@@ -405,19 +414,14 @@ class SolarPredictionServer:
                 "deviceId": device_id,
                 "timestamp": time.time(),
                 "timestamp_str": datetime.fromtimestamp(time.time()).isoformat(),
-                "inference_time_ms": inference_time,
+                "inference_time_ms": result['performance']['inference_time_ms'],
                 "status": "success",
                 "total_energy_kwh": result['total_energy_kwh'],
                 "total_energy_formatted": result['total_energy_formatted'],
                 "hourly_energy": result['hourly_energy'],
-                "hourly_output": hourly_output,  # Formatted hourly output
+                "hourly_output": result['hourly_output'],  # Formatted hourly output
                 "irradiance": result['irradiance'],
-                "performance": {
-                    "model_size_mb": self.model_manager.model_size_mb,
-                    "inference_time_ms": inference_time,
-                    "cpu_usage": psutil.cpu_percent(interval=0.1),
-                    "ram_usage_mb": result['performance']['ram_usage_mb']
-                }
+                "performance": result['performance']
             }
             
             # Also create a simplified response with just the total energy if needed
@@ -435,7 +439,7 @@ class SolarPredictionServer:
                 json.dumps(response),
                 1
             )
-            logger.info(f"✅ Full response sent for request {request_id} (inference: {inference_time:.2f}ms)")
+            logger.info(f"✅ Full response sent for request {request_id} (inference: {result['performance']['inference_time_ms']:.2f}ms)")
             
             # Also publish simplified response to result topic
             self.mqtt_client.publish(
@@ -893,7 +897,7 @@ def send_test_prediction_request():
         }
         
         # For testing, we publish to request topic
-        client = mqtt.Client(client_id="test_client")
+        client = mqtt.Client(client_id="test_client", callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
         client.tls_set(
             ca_certs=str(Config.CLIENT_ROOT_CA),
             certfile=str(Config.CLIENT_CERT),
